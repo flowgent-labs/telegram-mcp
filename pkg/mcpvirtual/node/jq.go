@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/itchyny/gojq"
 	"telegram-mcp/pkg/mcpvirtual/pipeline"
+	"github.com/itchyny/gojq"
 )
 
 // JQNode evaluates a jq expression against pipeline data.

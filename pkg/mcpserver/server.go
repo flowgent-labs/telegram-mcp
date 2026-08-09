@@ -63,9 +63,9 @@ func requestLoggerMiddleware(next server.ToolHandlerFunc) server.ToolHandlerFunc
 			if v >= 1 {
 				status := 200
 				if err != nil {
-					status = 500
+					status = mcputils.ExtractUpstreamStatus(err, 502)
 				} else if result != nil && result.IsError {
-					status = 500
+					status = 502
 				}
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s [mcp] sid=%s %d %s (%s) error=%v\n", time.Now().Format(time.RFC3339), sid, status, request.Params.Name, duration, err)
@@ -210,8 +210,8 @@ func NewMCPServer() (*server.MCPServer, error) {
 	}
 
 	// Register virtual tools from config
-	aggConfigPath := mcputils.VirtualConfigPath("telegram-mcp")
-	aggEngine, err := engine.New(aggConfigPath, &registryAdapter{})
+	aggConfigPath := mcputils.VirtualConfigPath()
+	aggEngine, err := engine.New(aggConfigPath, &registryAdapter{}, &mcputils.NamedUpstreamHTTPClient{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load virtual tools: %v\n", err)
 	} else {

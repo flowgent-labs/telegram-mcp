@@ -11,15 +11,19 @@ import (
 )
 
 func TestSetGetConfig(t *testing.T) {
-	cfg := &Config{Upstream: mcpconfig.UpstreamConfig{Endpoint: "https://test.example.com"}}
+	cfg := &Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {Endpoint: "https://test.example.com"}}}
 	SetConfig(cfg)
 
 	got := GetConfig()
 	if got == nil {
 		t.Fatal("GetConfig returned nil")
 	}
-	if got.Upstream.Endpoint != "https://test.example.com" {
-		t.Errorf("endpoint: got %q, want %q", got.Upstream.Endpoint, "https://test.example.com")
+	d, ok := got.Upstream["default"]
+	if !ok {
+		t.Fatal("default upstream not found")
+	}
+	if d.Endpoint != "https://test.example.com" {
+		t.Errorf("endpoint: got %q, want %q", d.Endpoint, "https://test.example.com")
 	}
 
 	t.Run("nil config", func(t *testing.T) {
@@ -32,7 +36,7 @@ func TestSetGetConfig(t *testing.T) {
 
 func TestGetUpstreamEndpoint(t *testing.T) {
 	t.Run("configured", func(t *testing.T) {
-		SetConfig(&Config{Upstream: mcpconfig.UpstreamConfig{Endpoint: "https://custom.example.com"}})
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {Endpoint: "https://custom.example.com"}}})
 		got := GetUpstreamEndpoint()
 		if got != "https://custom.example.com" {
 			t.Errorf("got %q", got)
@@ -46,7 +50,7 @@ func TestGetUpstreamEndpoint(t *testing.T) {
 		}
 	})
 	t.Run("default when empty endpoint", func(t *testing.T) {
-		SetConfig(&Config{Upstream: mcpconfig.UpstreamConfig{Endpoint: ""}})
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {Endpoint: ""}}})
 		got := GetUpstreamEndpoint()
 		if got != "https://httpbin.org/anything" {
 			t.Errorf("got %q, want default", got)
@@ -62,19 +66,19 @@ func TestIsDefaultUpstreamEndpoint(t *testing.T) {
 		}
 	})
 	t.Run("empty endpoint", func(t *testing.T) {
-		SetConfig(&Config{Upstream: mcpconfig.UpstreamConfig{Endpoint: ""}})
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {Endpoint: ""}}})
 		if !IsDefaultUpstreamEndpoint() {
 			t.Error("should be default")
 		}
 	})
 	t.Run("explicit default value", func(t *testing.T) {
-		SetConfig(&Config{Upstream: mcpconfig.UpstreamConfig{Endpoint: "https://httpbin.org/anything"}})
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {Endpoint: "https://httpbin.org/anything"}}})
 		if !IsDefaultUpstreamEndpoint() {
 			t.Error("explicit default endpoint should still be default")
 		}
 	})
 	t.Run("custom endpoint", func(t *testing.T) {
-		SetConfig(&Config{Upstream: mcpconfig.UpstreamConfig{Endpoint: "https://custom.example.com"}})
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {Endpoint: "https://custom.example.com"}}})
 		if IsDefaultUpstreamEndpoint() {
 			t.Error("should not be default")
 		}
@@ -82,25 +86,25 @@ func TestIsDefaultUpstreamEndpoint(t *testing.T) {
 }
 
 func TestGetUpstreamToken(t *testing.T) {
-	t.Run("static bearer token", func(t *testing.T) {
-		SetConfig(&Config{Auth: mcpconfig.AuthConfig{
-			Backend: mcpconfig.BackendAuthConfig{
-				Static: mcpconfig.StaticAuthConfig{BearerToken: "test-token"},
+	t.Run("static web token", func(t *testing.T) {
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {
+			Auth: mcpconfig.UpstreamAuthConfig{
+				Static: mcpconfig.StaticAuthConfig{WebToken: "test-token"},
 			},
-		}})
+		}}})
 		got := GetUpstreamToken()
 		if got != "test-token" {
 			t.Errorf("got %q, want %q", got, "test-token")
 		}
 	})
-	t.Run("static bearer token file", func(t *testing.T) {
+	t.Run("static web token file", func(t *testing.T) {
 		tmpFile := filepath.Join(t.TempDir(), "token")
 		os.WriteFile(tmpFile, []byte("file-token"), 0644)
-		SetConfig(&Config{Auth: mcpconfig.AuthConfig{
-			Backend: mcpconfig.BackendAuthConfig{
-				Static: mcpconfig.StaticAuthConfig{BearerTokenFile: tmpFile},
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {
+			Auth: mcpconfig.UpstreamAuthConfig{
+				Static: mcpconfig.StaticAuthConfig{WebTokenFile: tmpFile},
 			},
-		}})
+		}}})
 		got := GetUpstreamToken()
 		if got != "file-token" {
 			t.Errorf("got %q, want %q", got, "file-token")
@@ -109,22 +113,22 @@ func TestGetUpstreamToken(t *testing.T) {
 	t.Run("token file with whitespace trimming", func(t *testing.T) {
 		tmpFile := filepath.Join(t.TempDir(), "tok2")
 		os.WriteFile(tmpFile, []byte("  padded-token  \n"), 0644)
-		SetConfig(&Config{Auth: mcpconfig.AuthConfig{
-			Backend: mcpconfig.BackendAuthConfig{
-				Static: mcpconfig.StaticAuthConfig{BearerTokenFile: tmpFile},
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {
+			Auth: mcpconfig.UpstreamAuthConfig{
+				Static: mcpconfig.StaticAuthConfig{WebTokenFile: tmpFile},
 			},
-		}})
+		}}})
 		got := GetUpstreamToken()
 		if got != "padded-token" {
 			t.Errorf("token should be trimmed, got %q", got)
 		}
 	})
 	t.Run("missing token file", func(t *testing.T) {
-		SetConfig(&Config{Auth: mcpconfig.AuthConfig{
-			Backend: mcpconfig.BackendAuthConfig{
-				Static: mcpconfig.StaticAuthConfig{BearerTokenFile: "/nonexistent/token"},
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {
+			Auth: mcpconfig.UpstreamAuthConfig{
+				Static: mcpconfig.StaticAuthConfig{WebTokenFile: "/nonexistent/token"},
 			},
-		}})
+		}}})
 		got := GetUpstreamToken()
 		if got != "" {
 			t.Errorf("expected empty for missing file, got %q", got)
@@ -141,11 +145,11 @@ func TestGetUpstreamToken(t *testing.T) {
 
 func TestGetUpstreamCookie(t *testing.T) {
 	t.Run("cookie token", func(t *testing.T) {
-		SetConfig(&Config{Auth: mcpconfig.AuthConfig{
-			Backend: mcpconfig.BackendAuthConfig{
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {
+			Auth: mcpconfig.UpstreamAuthConfig{
 				Static: mcpconfig.StaticAuthConfig{CookieToken: "JSESSIONID=abc123"},
 			},
-		}})
+		}}})
 		got := GetUpstreamCookie()
 		if got != "JSESSIONID=abc123" {
 			t.Errorf("got %q", got)
@@ -154,11 +158,11 @@ func TestGetUpstreamCookie(t *testing.T) {
 	t.Run("cookie token file", func(t *testing.T) {
 		tmpFile := filepath.Join(t.TempDir(), "cookie")
 		os.WriteFile(tmpFile, []byte("cookie-from-file"), 0644)
-		SetConfig(&Config{Auth: mcpconfig.AuthConfig{
-			Backend: mcpconfig.BackendAuthConfig{
+		SetConfig(&Config{Backend: map[string]mcpconfig.UpstreamEntryConfig{"default": {
+			Auth: mcpconfig.UpstreamAuthConfig{
 				Static: mcpconfig.StaticAuthConfig{CookieTokenFile: tmpFile},
 			},
-		}})
+		}}})
 		got := GetUpstreamCookie()
 		if got != "cookie-from-file" {
 			t.Errorf("got %q", got)
@@ -187,7 +191,7 @@ func TestKeyToEnvSegment(t *testing.T) {
 		{"downloadDir", "DOWNLOAD_DIR"},
 		{"oidc", "OIDC"},
 		{"httpTimeout", "HTTP_TIMEOUT"},
-		{"bearerToken", "BEARER_TOKEN"},
+		{"webToken", "WEB_TOKEN"},
 		{"", ""},
 	}
 	for _, tt := range tests {
@@ -245,7 +249,12 @@ func TestMatchConfigKey(t *testing.T) {
 }
 
 func TestVirtualConfigPath(t *testing.T) {
-	got := VirtualConfigPath("test-mcp")
+	// Must call LoadConfig first to initialise the package-level serviceName.
+	_, err := LoadConfig("test-mcp")
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	got := VirtualConfigPath()
 	if got == "" {
 		t.Error("VirtualConfigPath returned empty")
 	}
@@ -259,19 +268,19 @@ func TestVirtualConfigPath(t *testing.T) {
 func TestLogPrintAuth(t *testing.T) {
 	t.Run("disabled by default", func(t *testing.T) {
 		SetConfig(&Config{})
-		if logPrintAuth() {
+		if loggingPrintAuth() {
 			t.Error("should be disabled")
 		}
 	})
 	t.Run("enabled", func(t *testing.T) {
-		SetConfig(&Config{Runtime: mcpconfig.RuntimeConfig{LogAuthorization: true}})
-		if !logPrintAuth() {
+		SetConfig(&Config{Logging: mcpconfig.LoggingConfig{AuthVerbose: true}})
+		if !loggingPrintAuth() {
 			t.Error("should be enabled")
 		}
 	})
 	t.Run("nil config", func(t *testing.T) {
 		SetConfig(nil)
-		if logPrintAuth() {
+		if loggingPrintAuth() {
 			t.Error("nil config should be disabled")
 		}
 	})
@@ -297,16 +306,7 @@ func TestResolveDownloadDir(t *testing.T) {
 		if dir == "" {
 			t.Error("download dir should not be empty")
 		}
-	})
-	t.Run("custom", func(t *testing.T) {
-		customDir := filepath.Join(t.TempDir(), "custom-downloads")
-		SetConfig(&Config{Runtime: mcpconfig.RuntimeConfig{DownloadDir: customDir}})
-		dir, err := resolveDownloadDir()
-		if err != nil {
-			t.Errorf("resolveDownloadDir should not error: %v", err)
-		}
-		if dir != customDir {
-			t.Errorf("got %q, want %q", dir, customDir)
-		}
+		// Download dir is hardcoded to ~/.{serviceName}/ifs/download.
+		// (Users deploying on k8s can mount volumes to this fixed path.)
 	})
 }

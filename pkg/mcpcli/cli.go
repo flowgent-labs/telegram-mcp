@@ -48,8 +48,8 @@ func (r *virtualRegistry) CallTool(ctx context.Context, name string, args map[st
 
 // loadVirtualTools loads virtual tools from config and returns a name→entry map.
 func loadVirtualTools() map[string]pipeline.VirtualToolEntry {
-	cfgPath := mcputils.VirtualConfigPath("telegram-mcp")
-	aggEngine, err := engine.New(cfgPath, &virtualRegistry{})
+	cfgPath := mcputils.VirtualConfigPath()
+	aggEngine, err := engine.New(cfgPath, &virtualRegistry{}, &mcputils.NamedUpstreamHTTPClient{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to load virtual tools: %v\n", err)
 		return nil
@@ -98,7 +98,7 @@ func ListTools() {
 	})
 
 	if len(nativeTools) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: no native tools are enabled. To expose native tools, set nativeTools.expose.register_all_tools_by_default: true or add tool names to tools.expose.includes in ~/.telegram-mcp/config.yaml\n")
+		fmt.Fprintf(os.Stderr, "Warning: no native tools are enabled. To expose native tools, set native_tools.expose.register_all_tools_by_default: true or add tool names to tools.expose.includes in ~/.telegram-mcp/config.yaml\n")
 	}
 
 	fmt.Printf("Available subcommands (%d):\n", len(allTools))
@@ -153,10 +153,13 @@ func Call(binName, toolName string, args []string) error {
 
 func callNative(binName, toolName string, args []string, entry mcptools.ToolEntry) error {
 	cfg, _ := mcputils.LoadConfig("telegram-mcp")
-	if cfg != nil && cfg.Tools.Expose != nil {
-		enabled := resolveEnabledTools(cfg)
-		if enabled != nil && !enabled[toolName] {
-			return fmt.Errorf("tool %q is not enabled in config.yaml", toolName)
+	if cfg != nil {
+		mcputils.SetConfig(cfg)
+		if cfg.Tools.Expose != nil {
+			enabled := resolveEnabledTools(cfg)
+			if enabled != nil && !enabled[toolName] {
+				return fmt.Errorf("tool %q is not enabled in config.yaml", toolName)
+			}
 		}
 	}
 

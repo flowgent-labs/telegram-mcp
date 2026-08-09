@@ -32,17 +32,17 @@ spec:
   parentRefs:
     - name: {{ include "telegram-mcp.fullname" . }}
       port: {{ .Values.ingress.envoy.gatewayPort }}
-  {{- range .Values.ingress.envoy.hosts }}
   hostnames:
+{{- range .Values.ingress.envoy.hosts }}
     - {{ .host | quote }}
-  {{- end }}
+{{- end }}
   rules:
     {{- range .Values.ingress.envoy.hosts }}
     {{- range .paths }}
     - matches:
         - path:
             type: PathPrefix
-            value: {{ .path }}
+            value: {{ .path | quote }}
       backendRefs:
         - name: {{ include "telegram-mcp.fullname" $ }}
           port: {{ $.Values.service.port }}

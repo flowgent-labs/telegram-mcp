@@ -87,34 +87,34 @@ func TestGetClientTokenClaims(t *testing.T) {
 	})
 }
 
-func TestFrontendAuthEnabled(t *testing.T) {
+func TestServerAuthEnabled(t *testing.T) {
 	t.Run("disabled", func(t *testing.T) {
 		SetConfig(&Config{})
-		if FrontendAuthEnabled() {
+		if ServerAuthEnabled() {
 			t.Error("should be disabled")
 		}
 	})
 	t.Run("nil config", func(t *testing.T) {
 		SetConfig(nil)
-		if FrontendAuthEnabled() {
+		if ServerAuthEnabled() {
 			t.Error("should be disabled")
 		}
 	})
 }
 
-func TestFrontendIssuer(t *testing.T) {
+func TestServerIssuer(t *testing.T) {
 	t.Run("nil config", func(t *testing.T) {
 		SetConfig(nil)
-		if iss := FrontendIssuer(); iss != "" {
+		if iss := ServerIssuer(); iss != "" {
 			t.Errorf("expected empty, got %q", iss)
 		}
 	})
 }
 
-func TestFrontendResource(t *testing.T) {
+func TestServerResource(t *testing.T) {
 	t.Run("nil config", func(t *testing.T) {
 		SetConfig(nil)
-		if res := FrontendResource(); res != "" {
+		if res := ServerResource(); res != "" {
 			t.Errorf("expected empty, got %q", res)
 		}
 	})

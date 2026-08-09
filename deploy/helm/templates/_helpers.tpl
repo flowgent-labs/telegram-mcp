@@ -71,7 +71,7 @@ Secret name to use
 {{- required "secret.static.externalName is required when static.create is false and provider is static" .Values.secret.static.externalName }}
 {{- end }}
 {{- else if eq .Values.secret.provider "gcp" }}
-{{- include "telegram-mcp.fullname" . }}-gcp-secret
+{{- required "secretName helper is only valid for provider=static; provider=gcp uses CSI-mounted files" "" }}
 {{- else }}
 {{- required "secret.provider must be one of: static, gcp" .Values.secret.provider }}
 {{- end }}

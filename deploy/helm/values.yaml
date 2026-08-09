@@ -66,7 +66,9 @@ autoscaling:
 
 # -- Secret injection mechanism for auth credentials.
 #   provider: "static" = native k8s Secret (secret.static.create controls creation).
-#   provider: "gcp"    = GCP Secret Manager via CSI driver (requires GKE + SecretProviderClass).
+#   provider: "gcp"    = GCP Secret Manager via CSI driver. Secrets are mounted as
+#                        files under /mnt/secrets; the chart does not depend on
+#                        SecretProviderClass syncing to Kubernetes Secret objects.
 secret:
   provider: "static"
   static:
@@ -76,27 +78,34 @@ secret:
     externalName: ""
     annotations: {}
     # -- Static bearer token for upstream API auth.
-    bearerToken: ""
+    webToken: ""
     # -- Static cookie for upstream API auth.
     cookieToken: ""
-    # -- OIDC client secret (used with config.auth.backend.oidc).
+    # -- OIDC client secret (used with config.upstream.default.auth.oidc).
     oidcClientSecret: ""
+    # -- OIDC password grant password (only used when grant_type=password).
+    oidcPassword: ""
   gcp:
+    # -- SecretProviderClass provider name. Use "gke" for the managed GKE Secret
+    # Manager add-on, or "gcp" for the open-source Google provider.
+    providerName: "gke"
+    # -- CSI driver name. The managed GKE add-on uses secrets-store-gke.csi.k8s.io;
+    # the open-source driver uses secrets-store.csi.k8s.io.
+    csiDriver: "secrets-store-gke.csi.k8s.io"
     # -- GCP project ID where the Secret Manager secret lives.
     projectId: ""
-    # -- Secret Manager secret ID (the secret resource name, not the full path).
+    # -- Secret Manager secret IDs for each credential. When a specific ID is
+    # empty, secretId is used as a fallback for backward compatibility.
     secretId: ""
-    # -- Path to the GCP service account key file (mounted via k8s Secret).
-    # Set to empty string to rely on Workload Identity.
-    credentialsFile: ""
+    oidcClientSecretId: ""
+    webTokenSecretId: ""
+    cookieTokenSecretId: ""
 
 # -- MCP server configuration (mounted as ConfigMap)
 config:
-  auth:
-    # -- Frontend (inbound): validates bearer tokens presented by MCP clients
-    # (AI agents). Resource Server role per RFC 9728 / MCP Authorization spec.
-    # Only enforced on the http transport.
-    frontend:
+  # ---- Server (inbound) ----
+  server:
+    auth:
       oidc:
         enabled: false
         issuer: ""
@@ -106,49 +115,89 @@ config:
         audience: ""
         # -- When true, validated frontend JWT claims (sub, email) are forwarded
         # upstream as X-MCP-Client-Token-Sub and X-MCP-Client-Token-Email headers.
-        enableClientTokenClaimForward: true
+        enable_client_token_claim_forward: true
         # -- Additional JWT claims to forward as X-MCP-Client-Token-<Header-Name> headers.
-        additionalClientTokenClaimForward: []
         # e.g. ["given_name", "family_name", "preferred_username"]
-    # -- Backend (outbound): credentials the server uses to call upstream APIs.
-    # Independent from frontend — an inbound token is never reused outbound.
-    backend:
-      # -- OIDC client credentials flow (machine-to-machine).
-      oidc:
-        enabled: false
-        issuer: ""
-        clientId: ""
-        scopes: "openid"
-        tokenUrl: ""
-  tools:
-    registerAllByDefault: false
-    includes: []
-    excludes: []
+        additional_client_token_claim_forward: []
+    # -- Internal File System (IFS) REST API for binary file transfer.
+    ifs:
+      enabled: true
+    # -- HTTP server timeouts in seconds. 0 = disabled.
+    # write_timeout_seconds must be 0 for SSE (Streamable HTTP) transport.
+    read_timeout_seconds: 30
+    write_timeout_seconds: 0
+    idle_timeout_seconds: 120
+
+  # ---- Logging ----
+  logging:
+    level: 0                  # 0-10 (0=silent, 10=full debug)
+    auth_verbose: false       # set true to print Authorization/Cookie header values
+
+  # ---- Management ----
   mgmt:
     enabled: true
+    host: "0.0.0.0"
+    port: 9991
+    pprof:
+      enabled: false
+      server_bind: "0.0.0.0:6669"
     otel:
       enabled: false
       endpoint: ""
       protocol: "grpc"
-      sampleRate: 1.0
+      timeout: 10000
+      sample_rate: 1.0
     metrics:
       enabled: true
       prometheus: true
-  upstream:
-    endpoint: ""
-    enableMCPSessionForwarding: true
-  runtime:
-    downloadDir: ""
-    logAuthorization: false
+      export_interval: "30s"
+      histogram_boundaries:
+        task: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120]
+      labels: {}
 
-  # -- Virtual tools pipeline definitions.
-  # Each virtual tool has: name, description, inputSchema, and pipeline.
-  virtualTools: []
+  # ---- Upstream (outbound) ----
+  upstream:
+    default:
+      endpoint: ""
+      enable_mcp_session_forward: true
+      auth:
+        # -- OIDC client credentials flow (machine-to-machine).
+        oidc:
+          enabled: false
+          issuer: ""
+          client_id: ""
+          client_secret: ""
+          client_secret_file: ""
+          scopes: "openid"
+          grant_type: ""
+          token_url: ""
+          username: ""
+          # -- Do not store production passwords in ConfigMap values; use
+          # secret.static.oidcPassword with provider=static instead.
+          password: ""
+        static:
+          web_token: ""
+          web_token_file: ""
+          cookie_token: ""
+          cookie_token_file: ""
+
+  # ---- Native MCP Tools ----
+  native_tools:
+    expose:
+      register_all_tools_by_default: false
+      includes: []
+      excludes: []
+
+  # ---- Virtual Tools ----
+  # Compose multiple native tools into a single virtual tool via a declarative
+  # pipeline (call → jq → foreach → emit → return).
+  # Each virtual tool has: name, description, input_schema, and pipeline.
+  virtual_tools: []
   # Example:
-  # virtualTools:
-  #   - name: virt_chain
+  # virtual_tools:
+  #   - name: my_virtual_tool
   #     description: Chain multiple tool calls
-  #     inputSchema:
+  #     input_schema:
   #       type: object
   #       properties:
   #         name:

@@ -1,16 +1,49 @@
-# Environment variables with MCP__ prefix override these values.
-# e.g. MCP__AUTH__BACKEND__OIDC__CLIENT_ID overrides auth.backend.oidc.client_id
+# ---- Frontend / Backend ----
+# frontend = inbound: validates bearer tokens presented by MCP clients (AI agents).
+# backend  = outbound: upstream API endpoints the server calls, keyed by name.
+# The two are decoupled — the inbound token is never reused outbound.
 
-# ---- Upstream API endpoint ----
-upstream:
-  endpoint: ""               # upstream API base URL (e.g. https://api.example.com)
-  # When true, the MCP session ID is forwarded as X-MCP-Session-ID header.
-  enable_mcp_session_forward: true
+# ---- Frontend (inbound auth) ----
+server:
+  # Override the default service name (derived from the binary name).
+  # Affects filesystem paths and OpenTelemetry service.name.
 
-# ---- Runtime settings ----
-runtime:
-  download_dir: ""             # override download directory for binary responses
-  log_authorization: false     # set true to print Authorization header values in logs
+  # Maximum number of concurrent AI agent client MCP requests.
+  # HTTP server timeouts in seconds. 0 = disabled.
+  # write_timeout_seconds must be 0 for SSE (Streamable HTTP) transport.
+  read_timeout_seconds: 30
+  write_timeout_seconds: 0
+  idle_timeout_seconds: 120
+  auth:
+    # Standard OAuth 2.1 / OIDC JWT bearer validation (Resource Server role, RFC 9728).
+    # Only enforced on the http transport; stdio has no network boundary.
+    oidc:
+      enabled: false
+      issuer: ""            # e.g. https://idp.example.com/realms/myrealm
+      jwks_uri: ""          # optional override (auto-discovered from issuer if empty)
+      audience: ""          # expected JWT "aud" claim; also published as the RFC 9728 protected-resource identifier
+      # When true, validated frontend JWT claims (sub, email) are forwarded upstream
+      # as X-MCP-Client-Token-Sub and X-MCP-Client-Token-Email headers.
+      enable_client_token_claim_forward: true
+      # Additional JWT claims to forward as X-MCP-Client-Token-<Header-Name> headers.
+      # e.g. ["given_name", "family_name", "preferred_username"]
+      # additional_client_token_claim_forward: []
+  # ---- Internal File System (IFS) Data Plane ----
+  # Built-in REST API for binary file transfer, separate from the
+  # JSON-RPC 2.0 control plane at /mcp.
+  # Upload:   POST /_/ifs/upload/{yyyyMMdd}/{uuid}.{suffix}
+  # Download: GET  /_/ifs/download/{yyyyMMdd}/{uuid}.{suffix}
+  # Files stored under ~/.<app>/ifs/{download,upload}/{yyyyMMdd}/
+  # with UUID-based filenames to prevent collisions.
+  ifs:
+    enabled: true
+
+# ---- Logging ----
+logging:
+  # Controls server-side request/response logging verbosity.
+  # Priority for level: -v CLI flag > MCP__LOGGING__LEVEL ENV > logging.level in config.yaml
+  level: 0                      # 0-10 (0=silent, 1-3=access, 4-7=+headers, 8-9=+values, 10=+body)
+  auth_verbose: false           # set true to print Authorization/Cookie header values in logs
 
 # ---- Management Endpoints (metrics, tracing, pprof) ----
 mgmt:
@@ -34,46 +67,40 @@ mgmt:
       task: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120]
     labels: {}                 # static labels added to every metric
 
-# ---- Authentication ----
-# frontend = inbound: validates bearer tokens presented by MCP clients (AI agents).
-# backend  = outbound: credentials the server uses to call upstream APIs.
-# The two are independent — the inbound token is never reused outbound
-# (see MCP Authorization spec: Token Passthrough Prohibition).
-auth:
-  frontend:
-    # Standard OAuth 2.1 / OIDC JWT bearer validation (Resource Server role, RFC 9728).
-    # Only enforced on the http transport; stdio has no network boundary.
-    oidc:
-      enabled: false
-      issuer: ""            # e.g. https://idp.example.com/realms/myrealm
-      jwks_uri: ""          # optional override (auto-discovered from issuer if empty)
-      audience: ""          # expected JWT "aud" claim; also published as the RFC 9728 protected-resource identifier
-      # When true, validated frontend JWT claims (sub, email) are forwarded upstream
-      # as X-MCP-Client-Token-Sub and X-MCP-Client-Token-Email headers.
-      enable_client_token_claim_forward: true
-      # Additional JWT claims to forward as X-MCP-Client-Token-<Header-Name> headers.
-      # e.g. ["given_name", "family_name", "preferred_username"]
-      # additional_client_token_claim_forward: []
+# ---- Backend (outbound upstream) ----
+upstream:
+  default:
+    endpoint: ""               # primary upstream API base URL (e.g. https://api.example.com)
+    # When true, the MCP session ID is forwarded as X-MCP-Session-ID header.
+    enable_mcp_session_forward: true
+    auth:
+      # OIDC client credentials flow (machine-to-machine)
+      oidc:
+        enabled: false
+        issuer: ""            # e.g. https://keycloak.example.com/realms/myrealm
+        client_id: ""
+        client_secret: ""
+        scopes: "openid"       # space-separated scope list
+        token_url: ""          # optional override (auto-discovered from issuer if empty)
 
-  backend:
-    # OIDC client credentials flow (machine-to-machine)
-    oidc:
-      enabled: false
-      issuer: ""            # e.g. https://keycloak.example.com/realms/myrealm
-      client_id: ""
-      client_secret: ""
-      scopes: "openid"       # space-separated scope list
-      token_url: ""          # optional override (auto-discovered from issuer if empty)
+      # Static credentials for legacy / simple APIs
+      static:
+        web_token: ""       # static Bearer token
+        web_token_file: ""   # path to file containing bearer token (K8s secrets)
+        cookie_token: ""        # static cookie (e.g. JSESSIONID for legacy systems)
+        cookie_token_file: ""   # path to file containing cookie token (K8s secrets)
 
-    # Static credentials for legacy / simple APIs
-    static:
-      bearer_token: ""       # static Bearer token
-      bearer_token_file: ""   # path to file containing bearer token (K8s secrets)
-      cookie_token: ""        # static cookie (e.g. JSESSIONID for legacy systems)
-      cookie_token_file: ""   # path to file containing cookie token (K8s secrets)
+  # Additional named backends referenced by http pipeline steps.
+  # sonarqube:
+  #   endpoint: https://sonarqube.example.com
+  #   enable_mcp_session_forward: true
+  #   auth:
+  #     static:
+  #       web_token: ""       # static Bearer token for this upstream
+  #       cookie_token: ""    # static cookie token for this upstream
 
 # ---- Native MCP Tools ----
-nativeTools:
+native_tools:
   expose:
     # When true, all native tools are registered by default
     # (individual tools can be hidden via excludes).
@@ -103,7 +130,7 @@ nativeTools:
 # Compose multiple native tools into a single virtual tool via a declarative
 # e.g: 5-step pipeline (call → jq → foreach → emit → return).
 # Schema: https://github.com/flowgent-labs/mcpfather/blob/main/.agents/skills/virtual-tool-creator/resources/dsl-schema.json
-virtualTools:
+virtual_tools:
   # ---- get_newcode_issues --------------------------------------------------
   - name: get_newcode_issues
     enabled: true
@@ -111,7 +138,7 @@ virtualTools:
       Get all issues for new/changed code in a pull request on a branch,
       optionally filtered by source file path. Returns minimal fields +
       code snippet lines to conserve AI agent tokens.
-    inputSchema:
+    input_schema:
       type: object
       required: [projectKey, branch, pullRequest]
       properties:
@@ -163,8 +190,7 @@ virtualTools:
             ps: $opts.limit
         require:
           field: "issues"
-          nonEmpty: true
-          message: No issues found for the given project, branch and pull request.
+          message: SonarQube issues search response is missing the issues field.
       - id: enriched
         kind: foreach
         spec:
@@ -242,7 +268,7 @@ virtualTools:
       Get all open issues for a project on a branch, optionally filtered
       by source file path. Returns minimal fields + code snippet lines
       to conserve AI agent tokens.
-    inputSchema:
+    input_schema:
       type: object
       required: [projectKey, branch]
       properties:
@@ -295,8 +321,7 @@ virtualTools:
             ps: $opts.limit
         require:
           field: "issues"
-          nonEmpty: true
-          message: No issues found for the given project and branch.
+          message: SonarQube issues search response is missing the issues field.
       - id: enriched
         kind: foreach
         spec:

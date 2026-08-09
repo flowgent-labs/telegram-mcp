@@ -4,6 +4,8 @@ Translate common bash API orchestration patterns into the virtual tool pipeline 
 
 ## Single API Call
 
+### Via native MCP tool (`call`)
+
 **Bash**:
 ```bash
 curl "$BASE/api/v2/apps/$ID" -o result.json
@@ -32,6 +34,46 @@ If the upstream returns JSON and downstream steps need parsed data, add `parse: 
 ```
 
 Without `parse: json`, the response is kept as a raw text string.
+
+### Via direct HTTP (`http`)
+
+Use when no native MCP tool wraps the endpoint. References a named `backend` entry from config.
+
+**Bash**:
+```bash
+curl -H "Authorization: Bearer $TOKEN" "$BASE/api/v2/components"
+```
+
+**Pipeline**:
+```yaml
+- id: fetchComponents
+  kind: http
+  spec:
+    # named upstream key (added under upstream map): sonatypeiq
+    method: GET
+    path: /api/v2/components
+    parse: json
+
+- id: done
+  kind: return
+  spec:
+    from: $fetchComponents
+```
+
+**Config** (`backend` entry):
+```yaml
+upstream:
+  default:
+    endpoint: https://api.example.com
+    auth: ...
+  sonatypeiq:
+    endpoint: https://iq.example.com
+    auth:
+      static:
+        web_token: "${MCP__UPSTREAM__SONATYPEIQ__AUTH__STATIC__WEB_TOKEN}"
+```
+
+The `http` step supports `query`, `headers`, and `body` fields with `$ref` resolution, and auto-detects JSON responses when `parse` is omitted. A non-2xx response causes the step to fail.
 
 ## Chained Calls (B depends on A)
 

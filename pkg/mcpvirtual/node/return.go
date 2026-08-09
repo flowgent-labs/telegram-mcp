@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/itchyny/gojq"
 	"telegram-mcp/pkg/mcpvirtual/pipeline"
+	"github.com/itchyny/gojq"
 )
 
 // ReturnValue resolves the return step's value. If an `expr` is present,

@@ -25,7 +25,7 @@ type oidcToken struct {
 
 // oidcManager handles OIDC client credentials flow with auto-refresh.
 type oidcManager struct {
-	cfg        BackendOIDCConfig
+	cfg        UpstreamOIDCConfig
 	httpClient *http.Client
 	token      *oidcToken
 	mu         sync.Mutex
@@ -40,7 +40,7 @@ var (
 
 // InitOIDC starts the OIDC token manager. Safe to call multiple times; only the
 // first call has effect. When OIDC is disabled in config, this is a no-op.
-func InitOIDC(cfg BackendOIDCConfig) {
+func InitOIDC(cfg UpstreamOIDCConfig) {
 	oidcOnce.Do(func() {
 		if !cfg.Enabled {
 			return
@@ -111,10 +111,14 @@ func (m *oidcManager) refreshLocked(ctx context.Context) error {
 	if grantType == "" {
 		grantType = "client_credentials"
 	}
+	clientSecret, err := m.clientSecret()
+	if err != nil {
+		return err
+	}
 	data := url.Values{
 		"grant_type":    {grantType},
 		"client_id":     {m.cfg.ClientID},
-		"client_secret": {m.cfg.ClientSecret},
+		"client_secret": {clientSecret},
 	}
 	if grantType == "password" {
 		data.Set("username", m.cfg.Username)
@@ -163,6 +167,17 @@ func (m *oidcManager) refreshLocked(ctx context.Context) error {
 		ExpiresAt:   time.Now().Add(time.Duration(expiresIn) * time.Second),
 	}
 	return nil
+}
+
+func (m *oidcManager) clientSecret() (string, error) {
+	if m.cfg.ClientSecret != "" || m.cfg.ClientSecretFile == "" {
+		return m.cfg.ClientSecret, nil
+	}
+	secretBytes, err := os.ReadFile(m.cfg.ClientSecretFile)
+	if err != nil {
+		return "", fmt.Errorf("read OIDC client_secret_file: %w", err)
+	}
+	return strings.TrimSpace(string(secretBytes)), nil
 }
 
 func (m *oidcManager) resolveTokenURL(ctx context.Context) (string, error) {

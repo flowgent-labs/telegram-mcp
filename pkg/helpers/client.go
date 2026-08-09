@@ -5,11 +5,11 @@ package mcputils
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/google/uuid"
 )
 
 type contextKey string
@@ -109,7 +111,7 @@ func ForwardRequest(ctx context.Context, upstreamBase string, method string, pat
 	// The client's own Authorization header is deliberately excluded above
 	// (see "authorization" in the skip list) and never falls through here.
 	// Per the MCP Authorization spec's Token Passthrough Prohibition, a
-	// token issued for this MCP server (validated by the frontend resource
+	// token issued for this MCP server (validated by the server resource
 	// server layer, see resource_server.go) MUST NOT be forwarded as-is to
 	// upstream APIs it was never issued for. The server always uses its own
 	// backend credential instead.
@@ -123,7 +125,7 @@ func ForwardRequest(ctx context.Context, upstreamBase string, method string, pat
 	}
 
 	// Forward MCP session ID when enable_mcp_session_forward is configured.
-	if cfg := GetConfig(); cfg != nil && cfg.Upstream.EnableMCPSessionForward {
+	if cfg := GetConfig(); cfg != nil && cfg.Upstream["default"].EnableMCPSessionForward {
 		if sid := GetSessionID(ctx); sid != "" {
 			req.Header.Set("X-MCP-Session-ID", sid)
 		}
@@ -132,14 +134,14 @@ func ForwardRequest(ctx context.Context, upstreamBase string, method string, pat
 	// Forward validated client token claims when enable_client_token_claim_forward
 	// is configured (default: true). These are extracted from the frontend JWT
 	// by the resource server layer — never from the inbound Authorization header.
-	if cfg := GetConfig(); cfg != nil && cfg.Auth.Frontend.OIDC.EnableClientTokenClaimForward {
+	if cfg := GetConfig(); cfg != nil && cfg.Server.Auth.OIDC.EnableClientTokenClaimForward {
 		if sub := GetClientTokenSub(ctx); sub != "" {
 			req.Header.Set("X-MCP-Client-Token-Sub", sub)
 		}
 		if email := GetClientTokenEmail(ctx); email != "" {
 			req.Header.Set("X-MCP-Client-Token-Email", email)
 		}
-		for _, claim := range cfg.Auth.Frontend.OIDC.AdditionalClientTokenClaimForward {
+		for _, claim := range cfg.Server.Auth.OIDC.AdditionalClientTokenClaimForward {
 			if v := GetClientTokenClaim(ctx, claim); v != "" {
 				req.Header.Set("X-MCP-Client-Token-"+HeaderizeClaim(claim), v)
 			}
@@ -173,6 +175,111 @@ func FormatAuthorizationHeader(token string) string {
 		return token
 	}
 	return "Bearer " + token
+}
+
+// NamedUpstreamHTTPClient implements pipeline.HTTPClient for extra_upstream endpoints.
+type NamedUpstreamHTTPClient struct{}
+
+func (c *NamedUpstreamHTTPClient) Call(ctx context.Context, upstream, method, path string, queryParams, headers map[string]string, body interface{}) (int, []byte, error) {
+	endpoint := GetNamedUpstreamEndpoint(upstream)
+	if endpoint == "" {
+		return 0, nil, fmt.Errorf("extra_upstream %q not found in config", upstream)
+	}
+
+	fullURL := strings.TrimSuffix(endpoint, "/") + path
+	if len(queryParams) > 0 {
+		q := url.Values{}
+		for k, v := range queryParams {
+			q.Set(k, v)
+		}
+		fullURL += "?" + q.Encode()
+	}
+
+	var bodyReader io.Reader
+	var bodyBytes []byte
+	if body != nil && method != "GET" && method != "HEAD" {
+		var err error
+		bodyBytes, err = marshalJSONNoSci(body)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		bodyReader = strings.NewReader(string(bodyBytes))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if bodyReader != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	if forwarded := GetHTTPHeaders(ctx); forwarded != nil {
+		for key, values := range forwarded {
+			lowerKey := strings.ToLower(key)
+			if lowerKey == "host" || lowerKey == "connection" || lowerKey == "keep-alive" ||
+				lowerKey == "proxy-authenticate" || lowerKey == "proxy-authorization" ||
+				lowerKey == "te" || lowerKey == "trailer" || lowerKey == "transfer-encoding" ||
+				lowerKey == "upgrade" || lowerKey == "authorization" || lowerKey == "cookie" ||
+				lowerKey == "content-length" || lowerKey == "mcp-session-id" || lowerKey == "content-type" {
+				continue
+			}
+			for _, v := range values {
+				req.Header.Add(key, v)
+			}
+		}
+	}
+
+	if token := GetNamedUpstreamToken(upstream); token != "" {
+		req.Header.Set("Authorization", FormatAuthorizationHeader(token))
+	}
+	if cookie := GetNamedUpstreamCookie(upstream); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if IsNamedUpstreamSessionForwardEnabled(upstream) {
+		if sid := GetSessionID(ctx); sid != "" {
+			req.Header.Set("X-MCP-Session-ID", sid)
+		}
+	}
+	if cfg := GetConfig(); cfg != nil && cfg.Server.Auth.OIDC.EnableClientTokenClaimForward {
+		if sub := GetClientTokenSub(ctx); sub != "" {
+			req.Header.Set("X-MCP-Client-Token-Sub", sub)
+		}
+		if email := GetClientTokenEmail(ctx); email != "" {
+			req.Header.Set("X-MCP-Client-Token-Email", email)
+		}
+		for _, claim := range cfg.Server.Auth.OIDC.AdditionalClientTokenClaimForward {
+			if v := GetClientTokenClaim(ctx, claim); v != "" {
+				req.Header.Set("X-MCP-Client-Token-"+HeaderizeClaim(claim), v)
+			}
+		}
+	}
+
+	InjectTraceContext(ctx, req.Header)
+	LogRequest(method, fullURL, url.Values{}, req.Header, bodyBytes)
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	return resp.StatusCode, respBody, nil
 }
 
 // valueToString converts an interface{} to a string suitable for URLs and
@@ -347,7 +454,7 @@ func DetermineFileName(resp *http.Response, defaultName string) string {
 	return defaultName + ext
 }
 
-// SaveBinaryStream streams the response body directly to a file in the downloads
+// SaveBinaryStream streams the response body directly to a file in the download
 // directory without buffering the entire content in memory. Returns the file path
 // and the number of bytes written.
 func SaveBinaryStream(resp *http.Response, defaultName string) (string, int64, error) {
@@ -356,10 +463,14 @@ func SaveBinaryStream(resp *http.Response, defaultName string) (string, int64, e
 	if err != nil {
 		return "", 0, err
 	}
-	if err := os.MkdirAll(downloadDir, 0755); err != nil {
-		return "", 0, fmt.Errorf("failed to create download directory %s: %w", downloadDir, err)
+	// IFS (Internal File System): store under {yyyyMMdd}/ with UUID.{suffix} naming
+	// to prevent collisions when the same file is downloaded multiple times.
+	dateDir := filepath.Join(downloadDir, time.Now().Format("20060102"))
+	if err := os.MkdirAll(dateDir, 0755); err != nil {
+		return "", 0, fmt.Errorf("failed to create IFS download directory %s: %w", dateDir, err)
 	}
-	filePath := filepath.Join(downloadDir, fileName)
+	fileID := generateFileID(fileName)
+	filePath := filepath.Join(dateDir, fileID)
 	f, err := os.Create(filePath)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to create file %s: %w", filePath, err)
@@ -373,7 +484,7 @@ func SaveBinaryStream(resp *http.Response, defaultName string) (string, int64, e
 }
 
 // ForwardAndParseResponse sends a request to the upstream and handles the full
-// response lifecycle: error status codes, binary downloads, and text responses.
+// response lifecycle: error status codes, binary download, and text responses.
 // All non-upload tool handlers call this to eliminate per-tool boilerplate.
 func ForwardAndParseResponse(ctx context.Context, upstreamBase, method, path string, args map[string]interface{}, pathKeys []string, contentType, toolName string) (*mcp.CallToolResult, error) {
 	startTime := time.Now()
@@ -408,49 +519,59 @@ func ForwardAndParseResponse(ctx context.Context, upstreamBase, method, path str
 	return mcp.NewToolResultText(string(body)), nil
 }
 
-// ForwardUploadRequest reads file data (from uploads directory or base64 content)
-// and sends it as the request body to the upstream service.
+// ForwardBinaryUploadRequest handles non-multipart file uploads (octet-stream,
+// image/*, video/*, audio/*). It downloads the file URI to the IFS temp cache
+// and forwards it as a raw binary request body to the upstream service.
 //
-// Two modes:
-//   - fileContentBase64 != "": decode and stage in uploads dir, then upload
-//     (supports HTTP mode where clients send file content inline).
-//   - fileContentBase64 == "": read fileName from the uploads directory
-//     (supports stdio mode where files are placed on the shared filesystem).
-func ForwardUploadRequest(ctx context.Context, upstreamBase, method, path, fileName, fileContentBase64, contentType, toolName string) (*mcp.CallToolResult, error) {
-	var fileData []byte
+// Like ForwardMultipartRequest, empty file refs are handled gracefully — when
+// the URI is empty, an empty request body is sent.
+func ForwardBinaryUploadRequest(ctx context.Context, upstreamBase, method, path string, args map[string]interface{}, fileRefs map[string]string, contentType, toolName string) (*mcp.CallToolResult, error) {
+	// Build URL with query parameters, excluding file refs and path params.
+	upstreamURL := strings.TrimSuffix(upstreamBase, "/") + path
+	query := url.Values{}
+	for key, val := range args {
+		if key == "body" {
+			continue
+		}
+		if _, isFile := fileRefs[key]; isFile {
+			continue
+		}
+		placeholder := "{" + key + "}"
+		if strings.Contains(upstreamURL, placeholder) {
+			upstreamURL = strings.ReplaceAll(upstreamURL, placeholder, valueToString(val))
+			continue
+		}
+		if strVal, ok := val.(string); ok {
+			query.Set(key, strVal)
+		} else {
+			query.Set(key, valueToString(val))
+		}
+	}
+	if len(query) > 0 {
+		upstreamURL += "?" + query.Encode()
+	}
 
-	if fileContentBase64 != "" {
-		decoded, err := base64.StdEncoding.DecodeString(fileContentBase64)
+	// Download the first file ref to IFS temp cache.
+	var fileData []byte
+	uri := fileRefs["file"]
+	if uri != "" {
+		tmpDir, err := resolveUploadTmpDir()
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to decode base64 file content: %v", err)), nil
+			return nil, fmt.Errorf("failed to resolve upload tmp dir: %w", err)
 		}
-		uploadDir, err := resolveUploadDir()
+		localPath, _, err := downloadFileFromURI(ctx, uri, tmpDir)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve upload dir: %w", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to download file from %s: %v", uri, err)), nil
 		}
-		if err := os.MkdirAll(uploadDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create upload directory %s: %w", uploadDir, err)
-		}
-		stagedPath := filepath.Join(uploadDir, filepath.Clean(fileName))
-		if err := os.WriteFile(stagedPath, decoded, 0644); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to stage uploaded file %s: %v", stagedPath, err)), nil
-		}
-		fileData = decoded
-	} else {
-		uploadDir, err := resolveUploadDir()
+		defer os.Remove(localPath)
+
+		fileData, err = os.ReadFile(localPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve upload dir: %w", err)
+			return nil, fmt.Errorf("failed to read downloaded file %s: %w", localPath, err)
 		}
-		localPath := filepath.Join(uploadDir, filepath.Clean(fileName))
-		data, err := os.ReadFile(localPath)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to read file %s from uploads directory: %v", localPath, err)), nil
-		}
-		fileData = data
 	}
 
 	startTime := time.Now()
-	upstreamURL := strings.TrimSuffix(upstreamBase, "/") + path
 
 	req, err := http.NewRequestWithContext(ctx, method, upstreamURL, bytes.NewReader(fileData))
 	if err != nil {
@@ -477,20 +598,20 @@ func ForwardUploadRequest(ctx context.Context, upstreamBase, method, path, fileN
 		req.Header.Set("Cookie", cookie)
 	}
 
-	if cfg := GetConfig(); cfg != nil && cfg.Upstream.EnableMCPSessionForward {
+	if cfg := GetConfig(); cfg != nil && cfg.Upstream["default"].EnableMCPSessionForward {
 		if sid := GetSessionID(ctx); sid != "" {
 			req.Header.Set("X-MCP-Session-ID", sid)
 		}
 	}
 
-	if cfg := GetConfig(); cfg != nil && cfg.Auth.Frontend.OIDC.EnableClientTokenClaimForward {
+	if cfg := GetConfig(); cfg != nil && cfg.Server.Auth.OIDC.EnableClientTokenClaimForward {
 		if sub := GetClientTokenSub(ctx); sub != "" {
 			req.Header.Set("X-MCP-Client-Token-Sub", sub)
 		}
 		if email := GetClientTokenEmail(ctx); email != "" {
 			req.Header.Set("X-MCP-Client-Token-Email", email)
 		}
-		for _, claim := range cfg.Auth.Frontend.OIDC.AdditionalClientTokenClaimForward {
+		for _, claim := range cfg.Server.Auth.OIDC.AdditionalClientTokenClaimForward {
 			if v := GetClientTokenClaim(ctx, claim); v != "" {
 				req.Header.Set("X-MCP-Client-Token-"+HeaderizeClaim(claim), v)
 			}
@@ -533,4 +654,484 @@ func ForwardUploadRequest(ctx context.Context, upstreamBase, method, path, fileN
 	LogResponse(ctx, resp.StatusCode, method, resp.Request.URL.String(), time.Since(startTime), resp.Header, body)
 
 	return mcp.NewToolResultText(string(body)), nil
+}
+
+// resolveUploadTmpDir returns the subdirectory under the download directory
+// where files downloaded from URIs are temporarily staged before being
+// forwarded to the upstream via a multipart request.
+func resolveUploadTmpDir() (string, error) {
+	downloadDir, err := resolveDownloadDir()
+	if err != nil {
+		return "", err
+	}
+	// Staging directory for FileRef download before multipart forwarding.
+	return filepath.Join(downloadDir, time.Now().Format("20060102")), nil
+}
+
+// downloadFileFromURI download a file from the given URI to a local
+// temporary file and returns the local file path and original filename.
+// Supports file:/// (local filesystem) and http(s):// (remote download).
+// The caller is responsible for removing the file when it is no longer needed.
+func downloadFileFromURI(ctx context.Context, uri string, tmpDir string) (localPath string, originalName string, err error) {
+	// Handle file:/// URIs — copy directly from local filesystem.
+	if strings.HasPrefix(uri, "file://") {
+		filePath := strings.TrimPrefix(uri, "file://")
+		// Also handle file://localhost/... and file:///...
+		filePath = strings.TrimPrefix(filePath, "localhost")
+		if !strings.HasPrefix(filePath, "/") {
+			return "", "", fmt.Errorf("invalid file URI: %s", uri)
+		}
+		if err := os.MkdirAll(tmpDir, 0755); err != nil {
+			return "", "", fmt.Errorf("create tmp dir %s: %w", tmpDir, err)
+		}
+		origName := filepath.Base(filePath)
+		fileID := generateFileID(origName)
+		localPath = filepath.Join(tmpDir, fileID)
+
+		src, err := os.Open(filePath)
+		if err != nil {
+			return "", "", fmt.Errorf("open %s: %w", filePath, err)
+		}
+		defer src.Close()
+
+		dst, err := os.Create(localPath)
+		if err != nil {
+			return "", "", fmt.Errorf("create %s: %w", localPath, err)
+		}
+		defer dst.Close()
+
+		if _, err := io.Copy(dst, src); err != nil {
+			return "", "", fmt.Errorf("copy %s: %w", filePath, err)
+		}
+		return localPath, origName, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", uri, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create download request for %s: %w", uri, err)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to download from %s: %w", uri, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("download from %s returned status %d", uri, resp.StatusCode)
+	}
+
+	// Determine filename from response headers or URL
+	fileName := ""
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if fn := params["filename"]; fn != "" {
+				fileName = filepath.Clean(fn)
+			}
+		}
+	}
+	if fileName == "" {
+		// Extract filename from URL path
+		if u, err := url.Parse(uri); err == nil {
+			if segs := strings.Split(strings.Trim(u.Path, "/"), "/"); len(segs) > 0 {
+				if name, _ := url.QueryUnescape(segs[len(segs)-1]); name != "" {
+					fileName = filepath.Clean(name)
+				}
+			}
+		}
+	}
+	if fileName == "" {
+		fileName = "downloaded_file"
+	}
+
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return "", "", fmt.Errorf("failed to create tmp directory %s: %w", tmpDir, err)
+	}
+
+	// Use UUID.{suffix} naming in IFS directory to avoid collisions.
+	fileID := generateFileID(fileName)
+	localPath = filepath.Join(tmpDir, fileID)
+	f, err := os.Create(localPath)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create local file %s: %w", localPath, err)
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return "", "", fmt.Errorf("failed to write downloaded file %s: %w", localPath, err)
+	}
+
+	return localPath, fileName, nil
+}
+
+// ForwardMultipartRequest handles multipart/form-data requests where file
+// arguments are provided as URIs (the FileRef pattern). It:
+//  1. Downloads each file URI to a local temp directory (~/.{service}/download/tmp/)
+//  2. Builds a multipart/form-data request body with form fields and file parts
+//  3. Sends the request to the upstream service
+//  4. Cleans up temporary files
+//  5. Returns the upstream response (or saves it as a binary download)
+//
+// Empty file refs (uri == "") produce empty file parts so the upstream
+// receives a well-formed multipart request even for optional files.
+func ForwardMultipartRequest(ctx context.Context, upstreamBase, method, path string, args map[string]interface{}, fileRefs map[string]string, pathKeys []string, toolName string) (*mcp.CallToolResult, error) {
+	startTime := time.Now()
+
+	// Build URL with path parameter substitution
+	upstreamURL := strings.TrimSuffix(upstreamBase, "/") + path
+	query := url.Values{}
+	for key, val := range args {
+		if key == "body" {
+			continue
+		}
+		// Check if this is a file ref — skip for URL building
+		if _, isFile := fileRefs[key]; isFile {
+			continue
+		}
+		placeholder := "{" + key + "}"
+		if strings.Contains(upstreamURL, placeholder) {
+			upstreamURL = strings.ReplaceAll(upstreamURL, placeholder, valueToString(val))
+		} else if !isPathKey(key, pathKeys) {
+			// Non-path, non-file args go to query string
+			if strVal, ok := val.(string); ok {
+				query.Set(key, strVal)
+			} else {
+				query.Set(key, valueToString(val))
+			}
+		}
+	}
+	if len(query) > 0 {
+		upstreamURL += "?" + query.Encode()
+	}
+
+	// Download each non-empty file URI to a local temp file.
+	hasDownloads := false
+	for _, uri := range fileRefs {
+		if uri != "" {
+			hasDownloads = true
+			break
+		}
+	}
+	var localFiles map[string]string
+	var origNames map[string]string
+	if hasDownloads {
+		tmpDir, err := resolveUploadTmpDir()
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve upload tmp dir: %w", err)
+		}
+		localFiles = make(map[string]string)
+		origNames = make(map[string]string)
+		for fieldName, uri := range fileRefs {
+			if uri == "" {
+				continue
+			}
+			localPath, origName, err := downloadFileFromURI(ctx, uri, tmpDir)
+			if err != nil {
+				for _, lp := range localFiles {
+					os.Remove(lp)
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("failed to download %s from %s: %v", fieldName, uri, err)), nil
+			}
+			localFiles[fieldName] = localPath
+			origNames[fieldName] = origName
+		}
+		// Clean up temp files when done
+		defer func() {
+			for _, lp := range localFiles {
+				os.Remove(lp)
+			}
+		}()
+	}
+
+	// Build multipart form body
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	// Add non-file form fields
+	for key, val := range args {
+		if key == "body" {
+			continue
+		}
+		if _, isFile := fileRefs[key]; isFile {
+			continue
+		}
+		if isPathKey(key, pathKeys) {
+			continue
+		}
+		writer.WriteField(key, valueToString(val))
+	}
+
+	// Add file parts (non-empty: downloaded content; empty: 0-byte part)
+	for fieldName := range fileRefs {
+		if localPath, ok := localFiles[fieldName]; ok {
+			origName := origNames[fieldName]
+			if origName == "" {
+				origName = filepath.Base(localPath)
+			}
+			part, err := writer.CreateFormFile(fieldName, origName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create form file for %s: %w", fieldName, err)
+			}
+			f, err := os.Open(localPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open local file %s: %w", localPath, err)
+			}
+			if _, err := io.Copy(part, f); err != nil {
+				f.Close()
+				return nil, fmt.Errorf("failed to copy file data for %s: %w", fieldName, err)
+			}
+			f.Close()
+		} else {
+			// Empty file argument — emit an empty file part so the
+			// upstream receives a well-formed multipart request.
+			_, err := writer.CreateFormFile(fieldName, fieldName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create empty form file for %s: %w", fieldName, err)
+			}
+		}
+	}
+	writer.Close()
+
+	// Build HTTP request
+	req, err := http.NewRequestWithContext(ctx, method, upstreamURL, &buf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create upstream request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Forward headers from context (same logic as ForwardRequest)
+	if forwarded := GetHTTPHeaders(ctx); forwarded != nil {
+		for key, values := range forwarded {
+			lowerKey := strings.ToLower(key)
+			if lowerKey == "host" || lowerKey == "connection" || lowerKey == "keep-alive" || lowerKey == "proxy-authenticate" || lowerKey == "proxy-authorization" || lowerKey == "te" || lowerKey == "trailer" || lowerKey == "transfer-encoding" || lowerKey == "upgrade" || lowerKey == "authorization" || lowerKey == "cookie" || lowerKey == "content-length" || lowerKey == "mcp-session-id" || lowerKey == "content-type" {
+				continue
+			}
+			for _, v := range values {
+				req.Header.Add(key, v)
+			}
+		}
+	}
+	if token := GetUpstreamToken(); token != "" {
+		req.Header.Set("Authorization", FormatAuthorizationHeader(token))
+	}
+	if cookie := GetUpstreamCookie(); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if cfg := GetConfig(); cfg != nil && cfg.Upstream["default"].EnableMCPSessionForward {
+		if sid := GetSessionID(ctx); sid != "" {
+			req.Header.Set("X-MCP-Session-ID", sid)
+		}
+	}
+	if cfg := GetConfig(); cfg != nil && cfg.Server.Auth.OIDC.EnableClientTokenClaimForward {
+		if sub := GetClientTokenSub(ctx); sub != "" {
+			req.Header.Set("X-MCP-Client-Token-Sub", sub)
+		}
+		if email := GetClientTokenEmail(ctx); email != "" {
+			req.Header.Set("X-MCP-Client-Token-Email", email)
+		}
+		for _, claim := range cfg.Server.Auth.OIDC.AdditionalClientTokenClaimForward {
+			if v := GetClientTokenClaim(ctx, claim); v != "" {
+				req.Header.Set("X-MCP-Client-Token-"+HeaderizeClaim(claim), v)
+			}
+		}
+	}
+
+	LogRequest(method, upstreamURL, query, req.Header, buf.Bytes())
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("upstream request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	LogResponse(ctx, resp.StatusCode, method, resp.Request.URL.String(), time.Since(startTime), resp.Header, nil)
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return mcp.NewToolResultError(fmt.Sprintf("upstream error: status %d, body: %s", resp.StatusCode, string(body))), nil
+	}
+
+	if IsBinaryDownload(resp) {
+		filePath, written, err := SaveBinaryStream(resp, toolName)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Saved to: %s (%d bytes)", filePath, written)), nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read upstream response: %w", err)
+	}
+
+	LogResponse(ctx, resp.StatusCode, method, resp.Request.URL.String(), time.Since(startTime), resp.Header, body)
+
+	return mcp.NewToolResultText(string(body)), nil
+}
+
+// isPathKey returns true when key is in the pathKeys slice.
+func isPathKey(key string, pathKeys []string) bool {
+	for _, pk := range pathKeys {
+		if pk == key {
+			return true
+		}
+	}
+	return false
+}
+
+// ---- IFS (Internal File System) helpers ----
+
+// generateFileID creates a UUID-based filename preserving the original suffix.
+// e.g. "report.pdf" → "550e8400-e29b-41d4-a716-446655440000.pdf"
+func generateFileID(originalName string) string {
+	suffix := filepath.Ext(originalName)
+	if suffix == "" {
+		suffix = ".bin"
+	}
+	return uuid.New().String() + suffix
+}
+
+// ---- IFS Data Plane HTTP Handlers ----
+//
+// These built-in REST endpoints form the "data plane" for binary file transfer,
+// separate from the JSON-RPC 2.0 "control plane" at /mcp.
+
+// HandleIFSDownload serves binary files from the IFS download directory.
+// URL pattern: GET /_/ifs/download/{yyyyMMdd}/{uuid}.{suffix}
+func HandleIFSDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract path after /_/ifs/download/
+	relPath := strings.TrimPrefix(r.URL.Path, "/_/ifs/download/")
+	if relPath == "" || relPath == r.URL.Path {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	// Validate path: must be {yyyyMMdd}/{uuid}.{suffix}
+	parts := strings.SplitN(relPath, "/", 2)
+	if len(parts) != 2 {
+		http.Error(w, "invalid IFS download path, expected /_/ifs/download/{yyyyMMdd}/{uuid}.{suffix}", http.StatusBadRequest)
+		return
+	}
+
+	downloadDir, err := resolveDownloadDir()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	filePath := filepath.Join(downloadDir, relPath)
+	// Prevent directory traversal
+	filePath = filepath.Clean(filePath)
+	if !strings.HasPrefix(filePath, filepath.Clean(downloadDir)) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	http.ServeFile(w, r, filePath)
+}
+
+// HandleIFSUpload accepts binary file upload to the IFS upload directory.
+// URL pattern: POST /_/ifs/upload/{yyyyMMdd}/{uuid}.{suffix}
+// The client can POST raw binary body (Content-Type: application/octet-stream)
+// or multipart/form-data with a "file" field.
+// Returns the download URL for the stored file.
+func HandleIFSUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Extract path after /_/ifs/upload/
+	relPath := strings.TrimPrefix(r.URL.Path, "/_/ifs/upload/")
+	if relPath == "" || relPath == r.URL.Path {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+
+	// Validate path: must be {yyyyMMdd}/{uuid}.{suffix}
+	parts := strings.SplitN(relPath, "/", 2)
+	if len(parts) != 2 {
+		http.Error(w, "invalid IFS upload path, expected /_/ifs/upload/{yyyyMMdd}/{uuid}.{suffix}", http.StatusBadRequest)
+		return
+	}
+
+	// Save uploaded files to the download directory — they are immediately
+	// available for retrieval via the download URL returned below.
+	downloadDir, err := resolveDownloadDir()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	dateDir := filepath.Join(downloadDir, parts[0])
+	if err := os.MkdirAll(dateDir, 0755); err != nil {
+		http.Error(w, fmt.Sprintf("failed to create upload directory: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	destPath := filepath.Join(dateDir, parts[1])
+	// Prevent directory traversal
+	destPath = filepath.Clean(destPath)
+	if !strings.HasPrefix(destPath, filepath.Clean(downloadDir)) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Accept raw binary body or multipart file upload
+	var fileData []byte
+	contentType := r.Header.Get("Content-Type")
+	if strings.Contains(contentType, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			http.Error(w, fmt.Sprintf("failed to parse multipart form: %v", err), http.StatusBadRequest)
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("missing 'file' field in multipart form: %v", err), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+		fileData, err = io.ReadAll(file)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read uploaded file: %v", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		fileData, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	if err := os.WriteFile(destPath, fileData, 0644); err != nil {
+		http.Error(w, fmt.Sprintf("failed to write file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return the download URL
+	downloadURL := fmt.Sprintf("/_/ifs/download/%s", relPath)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":       "ok",
+		"path":         destPath,
+		"download_url": downloadURL,
+		"size":         len(fileData),
+	})
 }

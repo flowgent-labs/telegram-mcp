@@ -5,8 +5,8 @@ package node
 import (
 	"fmt"
 
-	"github.com/itchyny/gojq"
 	"telegram-mcp/pkg/mcpvirtual/pipeline"
+	"github.com/itchyny/gojq"
 )
 
 // EmitNode evaluates a jq expression and returns the result — used within

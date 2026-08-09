@@ -37,102 +37,56 @@ spec:
           {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/server
+          args:
+            - --transport
+            - http
+            - --port
+            - {{ .Values.service.port | quote }}
           ports:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if .Values.config.mgmt.enabled }}
             - name: mgmt
-              containerPort: {{ .Values.service.mgmtPort }}
+              containerPort: {{ .Values.config.mgmt.port }}
               protocol: TCP
+            {{- end }}
           env:
-            - name: MCP__UPSTREAM__ENDPOINT
-              value: {{ .Values.config.upstream.endpoint | quote }}
-            {{- if .Values.config.auth.frontend.oidc.enabled }}
-            - name: MCP__AUTH__FRONTEND__OIDC__ENABLED
-              value: "true"
-            - name: MCP__AUTH__FRONTEND__OIDC__ISSUER
-              value: {{ .Values.config.auth.frontend.oidc.issuer | quote }}
-            {{- if .Values.config.auth.frontend.oidc.jwksUri }}
-            - name: MCP__AUTH__FRONTEND__OIDC__JWKS_URI
-              value: {{ .Values.config.auth.frontend.oidc.jwksUri | quote }}
-            {{- end }}
-            - name: MCP__AUTH__FRONTEND__OIDC__AUDIENCE
-              value: {{ .Values.config.auth.frontend.oidc.audience | quote }}
-            - name: MCP__AUTH__FRONTEND__OIDC__ENABLE_CLIENT_TOKEN_CLAIM_FORWARD
-              value: {{ .Values.config.auth.frontend.oidc.enableClientTokenClaimForward | quote }}
-            {{- if .Values.config.auth.frontend.oidc.additionalClientTokenClaimForward }}
-            - name: MCP__AUTH__FRONTEND__OIDC__ADDITIONAL_CLIENT_TOKEN_CLAIM_FORWARD
-              value: {{ join "," .Values.config.auth.frontend.oidc.additionalClientTokenClaimForward | quote }}
-            {{- end }}
-            {{- end }}
-            {{- if .Values.config.auth.backend.oidc.enabled }}
-            - name: MCP__AUTH__BACKEND__OIDC__ENABLED
-              value: "true"
-            - name: MCP__AUTH__BACKEND__OIDC__ISSUER
-              value: {{ .Values.config.auth.backend.oidc.issuer | quote }}
-            - name: MCP__AUTH__BACKEND__OIDC__CLIENT_ID
-              value: {{ .Values.config.auth.backend.oidc.clientId | quote }}
-            - name: MCP__AUTH__BACKEND__OIDC__SCOPES
-              value: {{ .Values.config.auth.backend.oidc.scopes | quote }}
-            {{- if .Values.config.auth.backend.oidc.tokenUrl }}
-            - name: MCP__AUTH__BACKEND__OIDC__TOKEN_URL
-              value: {{ .Values.config.auth.backend.oidc.tokenUrl | quote }}
-            {{- end }}
-            {{- if .Values.secret.static.create }}
-            - name: MCP__AUTH__BACKEND__OIDC__CLIENT_SECRET
+            - name: HOME
+              value: "/home/mcp"
+            {{- if and (eq .Values.secret.provider "static") .Values.config.upstream.default.auth.oidc.enabled (not .Values.config.upstream.default.auth.oidc.client_secret_file) }}
+            - name: MCP__UPSTREAM__DEFAULT__AUTH__OIDC__CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "telegram-mcp.secretName" . }}
                   key: oidc_client_secret
             {{- end }}
-            {{- end }}
-            {{- if and .Values.secret.static.create (eq .Values.secret.provider "static") }}
-            {{- if .Values.secret.static.bearerToken }}
-            - name: MCP__AUTH__BACKEND__STATIC__BEARER_TOKEN
+            {{- if and (eq .Values.secret.provider "static") (eq .Values.config.upstream.default.auth.oidc.grant_type "password") }}
+            - name: MCP__UPSTREAM__DEFAULT__AUTH__OIDC__PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "telegram-mcp.secretName" . }}
-                  key: bearer_token
+                  key: oidc_password
             {{- end }}
-            {{- if .Values.secret.static.cookieToken }}
-            - name: MCP__AUTH__BACKEND__STATIC__COOKIE_TOKEN
+            {{- if and (eq .Values.secret.provider "static") (or .Values.secret.static.create .Values.secret.static.externalName .Values.secret.static.webToken) }}
+            - name: MCP__UPSTREAM__DEFAULT__AUTH__STATIC__WEB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "telegram-mcp.secretName" . }}
-                  key: cookie_token
+                  key: web_token
+                  optional: true
             {{- end }}
-            {{- else if and (eq .Values.secret.provider "gcp") }}
-            {{- if .Values.secret.static.bearerToken }}
-            - name: MCP__AUTH__BACKEND__STATIC__BEARER_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "telegram-mcp.secretName" . }}
-                  key: bearer_token
-            {{- end }}
-            {{- if .Values.secret.static.cookieToken }}
-            - name: MCP__AUTH__BACKEND__STATIC__COOKIE_TOKEN
+            {{- if and (eq .Values.secret.provider "static") (or .Values.secret.static.create .Values.secret.static.externalName .Values.secret.static.cookieToken) }}
+            - name: MCP__UPSTREAM__DEFAULT__AUTH__STATIC__COOKIE_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "telegram-mcp.secretName" . }}
                   key: cookie_token
+                  optional: true
             {{- end }}
-            {{- end }}
-            - name: MCP__RUNTIME__LOG_AUTHORIZATION
-              value: {{ .Values.config.runtime.logAuthorization | quote }}
-            {{- if .Values.config.runtime.downloadDir }}
-            - name: MCP__RUNTIME__DOWNLOAD_DIR
-              value: {{ .Values.config.runtime.downloadDir | quote }}
-            {{- end }}
-          {{- if .Values.config.mgmt.otel.enabled }}
-            - name: MCP__MGMT__OTEL__ENABLED
-              value: "true"
-            - name: MCP__MGMT__OTEL__ENDPOINT
-              value: {{ .Values.config.mgmt.otel.endpoint | quote }}
-            - name: MCP__MGMT__OTEL__PROTOCOL
-              value: {{ .Values.config.mgmt.otel.protocol | quote }}
-            - name: MCP__MGMT__OTEL__SAMPLE_RATE
-              value: {{ .Values.config.mgmt.otel.sampleRate | quote }}
-          {{- end }}
+          {{- if .Values.config.mgmt.enabled }}
           livenessProbe:
             httpGet:
               path: /health
@@ -145,9 +99,10 @@ spec:
               port: mgmt
             initialDelaySeconds: 5
             periodSeconds: 10
+          {{- end }}
           volumeMounts:
             - name: config
-              mountPath: /home/mcp/config.yaml
+              mountPath: /home/mcp/.telegram-mcp/config.yaml
               subPath: config.yaml
             {{- if eq .Values.secret.provider "gcp" }}
             - name: secrets
@@ -156,7 +111,7 @@ spec:
             {{- end }}
             {{- if .Values.persistence.enabled }}
             - name: data
-              mountPath: /home/mcp/downloads
+              mountPath: /home/mcp/.telegram-mcp/ifs
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
@@ -167,7 +122,7 @@ spec:
         {{- if eq .Values.secret.provider "gcp" }}
         - name: secrets
           csi:
-            driver: secrets-store.csi.k8s.io
+            driver: {{ .Values.secret.gcp.csiDriver | quote }}
             readOnly: true
             volumeAttributes:
               secretProviderClass: {{ include "telegram-mcp.fullname" . }}-spc

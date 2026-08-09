@@ -38,8 +38,8 @@ const (
 	clientTokenClaimsKey contextKey = "client-token-claims"
 )
 
-// GetClientTokenSub returns the 'sub' claim from the validated frontend JWT.
-// Empty string when frontend auth is disabled or the claim was missing.
+// GetClientTokenSub returns the 'sub' claim from the validated server JWT.
+// Empty string when server auth is disabled or the claim was missing.
 func GetClientTokenSub(ctx context.Context) string {
 	if s, ok := ctx.Value(clientTokenSubKey).(string); ok {
 		return s
@@ -47,8 +47,8 @@ func GetClientTokenSub(ctx context.Context) string {
 	return ""
 }
 
-// GetClientTokenEmail returns the 'email' claim from the validated frontend JWT.
-// Empty string when frontend auth is disabled or the claim was missing.
+// GetClientTokenEmail returns the 'email' claim from the validated server JWT.
+// Empty string when server auth is disabled or the claim was missing.
 func GetClientTokenEmail(ctx context.Context) string {
 	if s, ok := ctx.Value(clientTokenEmailKey).(string); ok {
 		return s
@@ -58,7 +58,7 @@ func GetClientTokenEmail(ctx context.Context) string {
 
 // GetClientTokenClaim returns an arbitrary claim value from the validated
 // frontend JWT as a string. Returns empty string when the claim is missing,
-// not a string, or frontend auth is disabled.
+// not a string, or server auth is disabled.
 func GetClientTokenClaim(ctx context.Context, claim string) string {
 	if claims, ok := ctx.Value(clientTokenClaimsKey).(map[string]interface{}); ok {
 		if v, ok := claims[claim]; ok {
@@ -76,25 +76,25 @@ func GetClientTokenClaim(ctx context.Context, claim string) string {
 // "alg confusion" attack where a public key is replayed as an HMAC secret.
 var jwtValidAlgorithms = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"}
 
-// frontendAuthState holds the resolved JWKS keyfunc and validation config.
-type frontendAuthState struct {
-	cfg FrontendOIDCConfig
+// serverAuthState holds the resolved JWKS keyfunc and validation config.
+type serverAuthState struct {
+	cfg ServerOIDCConfig
 	kf  keyfunc.Keyfunc
 }
 
 var (
-	frontendAuthOnce sync.Once
-	frontendAuth     *frontendAuthState
-	frontendAuthErr  error
+	serverAuthOnce sync.Once
+	serverAuth     *serverAuthState
+	serverAuthErr  error
 )
 
-// InitFrontendAuth builds the JWKS keyfunc used to validate inbound bearer
+// InitServerAuth builds the JWKS keyfunc used to validate inbound bearer
 // tokens, launching a background refresh goroutine. Safe to call multiple
-// times; only the first call has effect. No-op when frontend OIDC validation
+// times; only the first call has effect. No-op when server OIDC validation
 // is disabled. Only meaningful for the http transport — stdio has no network
 // boundary to protect.
-func InitFrontendAuth(ctx context.Context, cfg FrontendOIDCConfig) error {
-	frontendAuthOnce.Do(func() {
+func InitServerAuth(ctx context.Context, cfg ServerOIDCConfig) error {
+	serverAuthOnce.Do(func() {
 		if !cfg.Enabled {
 			return
 		}
@@ -102,46 +102,46 @@ func InitFrontendAuth(ctx context.Context, cfg FrontendOIDCConfig) error {
 		if jwksURI == "" {
 			uri, err := discoverJWKSURI(ctx, cfg.Issuer)
 			if err != nil {
-				frontendAuthErr = fmt.Errorf("resolve JWKS URI from issuer discovery: %w", err)
+				serverAuthErr = fmt.Errorf("resolve JWKS URI from issuer discovery: %w", err)
 				return
 			}
 			jwksURI = uri
 		}
 		kf, err := keyfunc.NewDefaultCtx(ctx, []string{jwksURI})
 		if err != nil {
-			frontendAuthErr = fmt.Errorf("init JWKS client for %s: %w", jwksURI, err)
+			serverAuthErr = fmt.Errorf("init JWKS client for %s: %w", jwksURI, err)
 			return
 		}
-		frontendAuth = &frontendAuthState{cfg: cfg, kf: kf}
+		serverAuth = &serverAuthState{cfg: cfg, kf: kf}
 	})
-	return frontendAuthErr
+	return serverAuthErr
 }
 
-// FrontendAuthEnabled reports whether inbound JWT validation is configured.
-func FrontendAuthEnabled() bool {
+// ServerAuthEnabled reports whether inbound JWT validation is configured.
+func ServerAuthEnabled() bool {
 	cfg := GetConfig()
-	return cfg != nil && cfg.Auth.Frontend.OIDC.Enabled
+	return cfg != nil && cfg.Server.Auth.OIDC.Enabled
 }
 
-// FrontendIssuer returns the configured frontend OIDC issuer, published as
+// ServerIssuer returns the configured server OIDC issuer, published as
 // an authorization server in the RFC 9728 metadata document.
-func FrontendIssuer() string {
+func ServerIssuer() string {
 	cfg := GetConfig()
 	if cfg == nil {
 		return ""
 	}
-	return cfg.Auth.Frontend.OIDC.Issuer
+	return cfg.Server.Auth.OIDC.Issuer
 }
 
-// FrontendResource returns the configured frontend audience, which doubles
+// ServerResource returns the configured frontend audience, which doubles
 // as the RFC 9728 protected-resource identifier (Resource Indicators, RFC
 // 8707, recommend the audience and resource identifier match).
-func FrontendResource() string {
+func ServerResource() string {
 	cfg := GetConfig()
 	if cfg == nil {
 		return ""
 	}
-	return cfg.Auth.Frontend.OIDC.Audience
+	return cfg.Server.Auth.OIDC.Audience
 }
 
 // ResourceMetadataURL builds the fully-qualified RFC 9728 Protected Resource
@@ -196,15 +196,15 @@ func discoverJWKSURI(ctx context.Context, issuer string) (string, error) {
 }
 
 // RequireBearerToken wraps an http.Handler with inbound JWT bearer token
-// validation (RFC 6750 §2.1, RFC 9068 JWT access tokens). When frontend OIDC
-// validation is disabled or InitFrontendAuth was never called, requests pass
+// validation (RFC 6750 §2.1, RFC 9068 JWT access tokens). When server OIDC
+// validation is disabled or InitServerAuth was never called, requests pass
 // through unauthenticated — preserving the pre-existing open-by-default
 // behavior for users who don't need inbound auth. resourceMetadataURL is
 // advertised via WWW-Authenticate on 401 responses so compliant clients can
 // discover how to obtain a token (RFC 9728 §5.1).
 func RequireBearerToken(resourceMetadataURL string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if frontendAuth == nil {
+		if serverAuth == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -218,14 +218,14 @@ func RequireBearerToken(resourceMetadataURL string, next http.Handler) http.Hand
 		claims := jwt.MapClaims{}
 		parserOpts := []jwt.ParserOption{
 			jwt.WithValidMethods(jwtValidAlgorithms),
-			jwt.WithIssuer(frontendAuth.cfg.Issuer),
+			jwt.WithIssuer(serverAuth.cfg.Issuer),
 			jwt.WithExpirationRequired(),
 		}
-		if frontendAuth.cfg.Audience != "" {
-			parserOpts = append(parserOpts, jwt.WithAudience(frontendAuth.cfg.Audience))
+		if serverAuth.cfg.Audience != "" {
+			parserOpts = append(parserOpts, jwt.WithAudience(serverAuth.cfg.Audience))
 		}
 
-		parsedToken, err := jwt.ParseWithClaims(token, claims, frontendAuth.kf.Keyfunc, parserOpts...)
+		parsedToken, err := jwt.ParseWithClaims(token, claims, serverAuth.kf.Keyfunc, parserOpts...)
 		if err != nil {
 			writeUnauthorized(w, resourceMetadataURL, fmt.Sprintf("invalid token: %v", err))
 			return
@@ -259,8 +259,8 @@ func bearerTokenFromHeader(h string) (string, bool) {
 // writeUnauthorized returns 401 with a WWW-Authenticate header pointing to
 // the RFC 9728 Protected Resource Metadata document.
 func writeUnauthorized(w http.ResponseWriter, resourceMetadataURL string, reason string) {
-	if logPrintAuth() {
-		fmt.Fprintf(os.Stderr, "Warning: frontend auth rejected request: %s\n", reason)
+	if loggingPrintAuth() {
+		fmt.Fprintf(os.Stderr, "Warning: server auth rejected request: %s\n", reason)
 	}
 	value := `Bearer error="invalid_token"`
 	if resourceMetadataURL != "" {

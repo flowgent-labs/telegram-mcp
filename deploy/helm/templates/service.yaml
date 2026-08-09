@@ -11,9 +11,11 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    {{- if .Values.config.mgmt.enabled }}
     - port: {{ .Values.service.mgmtPort }}
       targetPort: mgmt
       protocol: TCP
       name: mgmt
+    {{- end }}
   selector:
     {{- include "telegram-mcp.selectorLabels" . | nindent 4 }}

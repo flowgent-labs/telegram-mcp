@@ -4,12 +4,21 @@ The MCP server has been deployed.
 
 **Service:** {{ include "telegram-mcp.fullname" . }} ({{ .Values.service.type }})
   - MCP HTTP:  http://<service-ip>:{{ .Values.service.port }}/mcp
+{{- if .Values.config.mgmt.enabled }}
   - Mgmt/Health: http://<service-ip>:{{ .Values.service.mgmtPort }}/health
   - Metrics:   http://<service-ip>:{{ .Values.service.mgmtPort }}/metrics
+{{- end }}
 
-{{- if .Values.ingress.enabled }}
-**Ingress:**
-{{- range .Values.ingress.hosts }}
+{{- if .Values.ingress.nginx.enabled }}
+**Nginx Ingress:**
+{{- range .Values.ingress.nginx.hosts }}
+  http://{{ .host }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.ingress.envoy.enabled }}
+**Envoy Gateway:**
+{{- range .Values.ingress.envoy.hosts }}
   http://{{ .host }}
 {{- end }}
 {{- end }}
