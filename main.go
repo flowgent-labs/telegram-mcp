@@ -166,12 +166,16 @@ func printDefaultConfigYAML() {
 	fmt.Println("  # ---- Internal File System (IFS) Data Plane ----")
 	fmt.Println("  # Built-in REST API for binary file transfer, separate from the")
 	fmt.Println("  # JSON-RPC 2.0 control plane at /mcp.")
-	fmt.Println("  # Upload:   POST /_/ifs/upload/{yyyyMMdd}/{uuid}.{suffix}")
-	fmt.Println("  # Download: GET  /_/ifs/download/{yyyyMMdd}/{uuid}.{suffix}")
-	fmt.Println("  # Files stored under ~/." + "telegram-mcp" + "/ifs/{download,upload}/{yyyyMMdd}/")
-	fmt.Println("  # with UUID-based filenames to prevent collisions.")
+	fmt.Println("  # Upload:   POST /_/ifs/upload/{uuid}")
+	fmt.Println("  # Download: GET  /_/ifs/download/{uuid}")
+	fmt.Println("  # Files stored under ~/." + "telegram-mcp" + "/ifs/{download,upload}/")
 	fmt.Println("  ifs:")
 	fmt.Println("    enabled: true")
+	fmt.Println("    # Public base URI used to build returned IFS download URLs.")
+	fmt.Println("    # Empty means auto-detect from the inbound /mcp request Host/X-Forwarded-* headers.")
+	fmt.Println("    base_uri: \"\"")
+	fmt.Println("    # Completed temporary files older than this are removed by the background clean job.")
+	fmt.Println("    clean-job-ttl-seconds: \"5m\"")
 	fmt.Println()
 	fmt.Println("# ---- Logging ----")
 	fmt.Println("logging:")
@@ -340,7 +344,8 @@ func main() {
 
 		mcpServer := server.NewStreamableHTTPServer(s,
 			server.WithHTTPContextFunc(func(ctx context.Context, r *http.Request) context.Context {
-				return mcputils.WithHTTPHeaders(ctx, r.Header)
+				ctx = mcputils.WithHTTPHeaders(ctx, r.Header)
+				return mcputils.WithHTTPRequest(ctx, r)
 			}),
 		)
 
@@ -373,6 +378,7 @@ func main() {
 		// IFS (Internal File System) data plane: built-in REST endpoints for
 		// binary file upload/download, separate from the JSON-RPC control plane.
 		if cfg.Server.IFS.Enabled {
+			mcputils.StartIFSCleanJob(ctx)
 			mux.HandleFunc("/_/ifs/download/", mcputils.HandleIFSDownload)
 			mux.HandleFunc("/_/ifs/upload/", mcputils.HandleIFSUpload)
 			fmt.Fprintf(os.Stderr, "IFS data plane enabled: /_/ifs/download/ and /_/ifs/upload/\n")
