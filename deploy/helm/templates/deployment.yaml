@@ -111,7 +111,7 @@ spec:
             {{- end }}
             {{- if .Values.persistence.enabled }}
             - name: data
-              mountPath: /home/mcp/.telegram-mcp/ifs
+              mountPath: /home/mcp/.telegram-mcp/tfs
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
