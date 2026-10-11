@@ -22,6 +22,10 @@ import (
 type Config = mcpconfig.Config
 type ServerConfig = mcpconfig.ServerConfig
 type UpstreamEntryConfig = mcpconfig.UpstreamEntryConfig
+type MiddlewareConfig = mcpconfig.MiddlewareConfig
+type HTTPClientPoolConfig = mcpconfig.HTTPClientPoolConfig
+type RetryConfig = mcpconfig.RetryConfig
+type RetryOnConfig = mcpconfig.RetryOnConfig
 type ServerAuthConfig = mcpconfig.ServerAuthConfig
 type ServerOIDCConfig = mcpconfig.ServerOIDCConfig
 type UpstreamAuthConfig = mcpconfig.UpstreamAuthConfig
@@ -52,7 +56,7 @@ func SetConfig(cfg *Config) {
 	globalCfg = cfg
 }
 
-// GetConfig returns the global config. May be nil before LoadConfig is called.
+// GetConfig returns the global config. May be nil before SetConfig is called.
 func GetConfig() *Config {
 	globalCfgMu.RLock()
 	defer globalCfgMu.RUnlock()
